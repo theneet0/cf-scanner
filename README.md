@@ -45,7 +45,7 @@ Cloudflare scanner
 ## features
 
 - [x] HTTP/1.1 + HTTP/2 + HTTP/3
-- [x] Ping + Latency + Jitter + Download speed test
+- [x] Ping + Latency + Jitter + Download speed test + Upload speed test
 - [x] UTLS
 - [x] Noise for HTTP/3
 - [x] CSV format result
@@ -74,7 +74,7 @@ go build -ldflags "-w -s"
 
 - NOTE❕: Both HTTP/2 and HTTP/1.1 are supported, with protocol selection based on ALPN. If ALPN is explicitly set to `"h2"`, HTTP/2 will be used—provided the server supports it. By default, ALPN is set to `"h2", "http/1.1"`, allowing HTTP/2 when available; otherwise, the connection falls back to HTTP/1.1.
 - WARNING⚠️: When UTLS is enabled, ALPN is forcibly set to `"h2", "http/1.1"` and cannot be overridden via the configuration file.
-- WARNING⚠️: If DownloadTest is enabled, use only one Goroutine; running multiple will yield inaccurate results.
+- WARNING⚠️: If DownloadTest or UploadTest is enabled, use only one Goroutine; running multiple will yield inaccurate results.
 
 > [!CAUTION]
 > Avoid using your own domain for scanning activities, as CDN providers may interpret the traffic as DDoS or port scanning behavior and block your domain.
@@ -163,6 +163,14 @@ go build -ldflags "-w -s"
     "SNI": "cp.cloudflare.com", // The SNI value to use during the TLS handshake for DownloadTest.
     "TargetBytes": 5000000, // Expected data in bytes; if not met, report as JAMMED.
     "Timeout": 5000 // Timeout duration in milliseconds before aborting the download.
+ },
+ "UploadTest": {
+    "Enable": false, // Enable the upload speed test.
+    "SeparateConnection": false, // Open new connection for upload speed test. Enable for H3.
+    "Url": "https://speed.cloudflare.com/__up", // Target URL for upload.
+    "SNI": "cp.cloudflare.com", // The SNI value to use during the TLS handshake for UploadTest.
+    "TargetBytes": 2000000, // Expected data in bytes; if not met, report as JAMMED.
+    "Timeout": 5000 // Timeout duration in milliseconds before aborting the upload.
  }
 }
 ```

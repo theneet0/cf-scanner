@@ -30,5 +30,5 @@
 - گزینه `Goroutines` در فایل کانفیگ برای تعداد اسکن های همزمان میباشد. با افزایش این مقدار اسکن سریع تری خواهید داشت ولی درصد خطا تاخیر افزایش میابد
 - گزینه `HTTP/3` مناسب کانفیگ XHTTP H3
 - گزینه `HTTP/3` , `Noise` مناسب کانفیگ XHTTP H3 Noise
-- اگر تست سرعت `DownloadTest` فعال باشد مقدار `Goroutines` بر روی 1 تنظیم کنید
+- اگر تست سرعت `DownloadTest` یا `UploadTest` فعال باشد مقدار `Goroutines` بر روی 1 تنظیم کنید
 - سرعت اسکن به `Goroutines`, `MaxPing`, `Maxlatency` و `JitterInterval` وابسته است

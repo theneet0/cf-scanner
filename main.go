@@ -60,6 +60,15 @@ type DownloadConfig struct {
 	Timeout            int    `json:"Timeout"`
 }
 
+type UploadConfig struct {
+	Enable             bool   `json:"Enable"`
+	SeparateConnection bool   `json:"SeparateConnection"`
+	Url                string `json:"Url"`
+	SNI                string `json:"SNI"`
+	TargetBytes        int    `json:"TargetBytes"`
+	Timeout            int    `json:"Timeout"`
+}
+
 type FragmentConfig struct {
 	Enable   bool   `json:"Enable"`
 	Length   string `json:"Length"`
@@ -122,6 +131,7 @@ type Conf struct {
 	Noises             NoiseConfig         `json:"Noises"`
 	DomainScan         DS                  `json:"DomainScan"`
 	DownloadTest       DownloadConfig      `json:"DownloadTest"`
+	UploadTest         UploadConfig        `json:"UploadTest"`
 }
 
 func main() {
@@ -299,6 +309,7 @@ func main() {
 							// Calc jiiter
 							jitter_str := "Null"
 							download_test := "Null"
+							upload_test := "Null"
 							if conf.Jitter.Enable {
 								latencies := []float64{}
 								jammed := false
@@ -333,10 +344,13 @@ func main() {
 							if conf.DownloadTest.Enable {
 								download_test = downloadTest(client, &conf, addr, fingerprint, &fragment)
 							}
-							rep := fmt.Sprintf("%-21s %-12s %d\t%s\t%s\n", addr.String(), minrtt, latency, jitter_str, download_test)
+							if conf.UploadTest.Enable {
+								upload_test = uploadTest(client, &conf, addr, fingerprint, &fragment)
+							}
+							rep := fmt.Sprintf("%-21s %-12s %d\t%s\t%s\t%s\n", addr.String(), minrtt, latency, jitter_str, download_test, upload_test)
 							color.Green("%s", rep)
 							if conf.CSV {
-								file.Write(fmt.Sprintf("%s,%s,%d,%s,%s\n", addr.String(), minrtt, latency, jitter_str, download_test))
+								file.Write(fmt.Sprintf("%s,%s,%d,%s,%s,%s\n", addr.String(), minrtt, latency, jitter_str, download_test, upload_test))
 							} else {
 								file.Write(rep)
 							}
@@ -498,6 +512,7 @@ func main() {
 								// Calc jiiter
 								jitter_str := "Null"
 								download_test := "Null"
+								upload_test := "Null"
 								if conf.Jitter.Enable {
 									latencies := []float64{}
 									jammed := false
@@ -532,10 +547,13 @@ func main() {
 								if conf.DownloadTest.Enable {
 									download_test = downloadTest(client, &conf, addr, fingerprint, &fragment)
 								}
-								rep := fmt.Sprintf("%s:\t%s\t%s\t%d\t%s\t%s\n", domain, ip, minrtt, latency, jitter_str, download_test)
+								if conf.UploadTest.Enable {
+									upload_test = uploadTest(client, &conf, addr, fingerprint, &fragment)
+								}
+								rep := fmt.Sprintf("%s:\t%s\t%s\t%d\t%s\t%s\t%s\n", domain, ip, minrtt, latency, jitter_str, download_test, upload_test)
 								color.Green("%s", rep)
 								if conf.CSV {
-									file.Write(fmt.Sprintf("%s:%s,%s,%d,%s,%s\n", domain, ip, minrtt, latency, jitter_str, download_test))
+									file.Write(fmt.Sprintf("%s:%s,%s,%d,%s,%s,%s\n", domain, ip, minrtt, latency, jitter_str, download_test, upload_test))
 								} else {
 									file.Write(rep)
 								}

@@ -81,5 +81,13 @@
 		"SNI": "cp.cloudflare.com",
 		"TargetBytes": 5000000,
 		"Timeout": 5000
+	},
+	"UploadTest": {
+		"Enable": false,
+		"SeparateConnection": false,
+		"Url": "https://speed.cloudflare.com/__up",
+		"SNI": "cp.cloudflare.com",
+		"TargetBytes": 2000000,
+		"Timeout": 5000
 	}
 }

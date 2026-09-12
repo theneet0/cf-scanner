@@ -26,4 +26,4 @@
 ## Important Notes
 
 - You can exit the running scanner while still keeping the output stored in the result.exe file.
-- The Goroutines option in the config file determines the number of simultaneous scans. Increasing this value results in faster scans but also increases the chance of delay error.
+- The Goroutines option in the config file determines the number of simultaneous scans. Increasing this value results in faster scans but also increases the chance of delay error. If DownloadTest or UploadTest is enabled, set Goroutines to 1 for accurate speed test results.
