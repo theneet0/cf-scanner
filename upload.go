@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -48,7 +47,7 @@ func (r *zeroStreamReader) Read(p []byte) (int, error) {
 func uploadTest(preclient *http.Client, conf *Conf, addr net.TCPAddr, fingerprint utls.ClientHelloID, fragment *Fragment) string {
 	configUrl, configUrlErr := url.Parse(conf.UploadTest.Url)
 	if configUrlErr != nil {
-		log.Fatalln(configUrlErr)
+		exitOnError(fmt.Errorf("invalid upload test URL '%s': %w", conf.UploadTest.Url, configUrlErr))
 	}
 
 	var client *http.Client

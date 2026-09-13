@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,7 +15,7 @@ import (
 func downloadTest(preclient *http.Client, conf *Conf, addr net.TCPAddr, fingerprint utls.ClientHelloID, fragment *Fragment) string {
 	configUrl, configUrlErr := url.Parse(conf.DownloadTest.Url)
 	if configUrlErr != nil {
-		log.Fatalln(configUrlErr)
+		exitOnError(fmt.Errorf("invalid download test URL '%s': %w", conf.DownloadTest.Url, configUrlErr))
 	}
 
 	var client *http.Client

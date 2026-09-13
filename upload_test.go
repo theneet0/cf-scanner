@@ -425,20 +425,8 @@ func TestUploadTestScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to listen: %v", err)
 		}
-		defer l.Close()
-
 		tcpAddr := l.Addr().(*net.TCPAddr)
-
-		go func() {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			if tcp, ok := conn.(*net.TCPConn); ok {
-				_ = tcp.SetLinger(0)
-			}
-			conn.Close() // close immediately before any read
-		}()
+		_ = l.Close() // Close immediately so dial fails before transfer begins
 
 		conf := Conf{
 			UploadTest: UploadConfig{

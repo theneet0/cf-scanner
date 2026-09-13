@@ -8,17 +8,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"maps"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fatih/color"
@@ -134,27 +135,181 @@ type Conf struct {
 	UploadTest         UploadConfig        `json:"UploadTest"`
 }
 
-func main() {
-	// load config file
-	cfile, cfile_err := os.ReadFile("conf.json")
-	if cfile_err != nil {
-		log.Fatalln(cfile_err)
+var (
+	recentErrorsLock sync.Mutex
+	recentErrors     []string
+)
+
+func recordScanError(msg string) {
+	recentErrorsLock.Lock()
+	defer recentErrorsLock.Unlock()
+	if len(recentErrors) < 15 {
+		for _, e := range recentErrors {
+			if e == msg {
+				return
+			}
+		}
+		recentErrors = append(recentErrors, msg)
 	}
-	conf := Conf{}
-	conf_err := json.Unmarshal(cfile, &conf)
-	if conf_err != nil {
-		log.Fatalln(conf_err)
+}
+
+func defaultConf() Conf {
+	return Conf{
+		LogErr:             true,
+		CSV:                false,
+		RandomScan:         false,
+		Hostname:           "cp.cloudflare.com",
+		Ports:              []int{443},
+		Path:               "/",
+		Headers: map[string][]string{
+			"User-Agent": {"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0"},
+		},
+		ResponseHeader: map[string]string{
+			"Server": "cloudflare",
+		},
+		ResponseStatusCode: []int{200, 204},
+		Padding:            true,
+		PaddingSize:        "100-1000",
+		Ping: PingConfig{
+			Enable:     true,
+			MaxPing:    500,
+			Privileged: true,
+			Size:       "24-65",
+		},
+		Goroutines: 4,
+		Maxlatency: 2000,
+		Jitter: JitterConfig{
+			Enable:    true,
+			MaxJitter: 50.0,
+			Samples:   5,
+			Interval:  200,
+		},
+		IpVersion: 4,
+		TLS: TLSConfig{
+			Enable:   true,
+			SNI:      "cp.cloudflare.com",
+			Insecure: false,
+			Alpn:     []string{"h2", "http/1.1"},
+			Utls: UtlsConfig{
+				Enable:            true,
+				Fingerprint:       "chrome",
+				TcpTimeout:        1000,
+				TcpConnectAttempt: 1,
+				Fragment: FragmentConfig{
+					Enable:   false,
+					Length:   "50-100",
+					Delay:    "10-15",
+					MaxSplit: "",
+				},
+			},
+		},
+	}
+}
+
+func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			exitOnError(fmt.Errorf("fatal crash/panic: %v", r))
+		}
+	}()
+
+	// Support command line arguments and flags:
+	// cf-scanner [options] [IP | CIDR]
+	configPath := "conf.json"
+	cliIP := ""
+
+	for i := 1; i < len(os.Args); i++ {
+		arg := strings.TrimSpace(os.Args[i])
+		if arg == "" {
+			continue
+		}
+		switch {
+		case arg == "-h" || arg == "--help" || arg == "-help" || arg == "/?":
+			fmt.Println("Usage: cf-scanner [options] [IP|CIDR]")
+			fmt.Println("\nArguments:")
+			fmt.Println("  [IP|CIDR]               Single IP (e.g. 1.1.1.1, 1.1.1.1/32, 2606:4700::1) or CIDR to scan")
+			fmt.Println("  [config.json]           Custom JSON config file path")
+			fmt.Println("\nOptions:")
+			fmt.Println("  -c, --config <file>     Path to configuration file")
+			fmt.Println("  -i, --ip <ip>           Single IP or CIDR to scan")
+			fmt.Println("  -h, --help              Show this help message")
+			waitOnWindows()
+			return
+		case arg == "-c" || arg == "--config" || arg == "-config":
+			if i+1 < len(os.Args) {
+				i++
+				configPath = strings.TrimSpace(os.Args[i])
+			}
+		case strings.HasPrefix(arg, "--config="):
+			configPath = strings.TrimSpace(strings.TrimPrefix(arg, "--config="))
+		case strings.HasPrefix(arg, "-c="):
+			configPath = strings.TrimSpace(strings.TrimPrefix(arg, "-c="))
+		case arg == "-i" || arg == "--ip" || arg == "-ip":
+			if i+1 < len(os.Args) {
+				i++
+				cliIP = strings.TrimSpace(os.Args[i])
+			}
+		case strings.HasPrefix(arg, "--ip="):
+			cliIP = strings.TrimSpace(strings.TrimPrefix(arg, "--ip="))
+		case strings.HasPrefix(arg, "-i="):
+			cliIP = strings.TrimSpace(strings.TrimPrefix(arg, "-i="))
+		case strings.HasSuffix(strings.ToLower(arg), ".json"):
+			configPath = arg
+		default:
+			if cliIP == "" {
+				cliIP = arg
+			}
+		}
 	}
 
-	// Download ipv4.txt if not exist
-	// _, exist := os.Stat("ipv4.txt")
-	// if exist != nil {
-	// 	e := GithubAPI("https://api.github.com/repos/compassvpn/cf-tools/releases/latest", "all_cf_v4.txt", "ipv4.txt")
-	// 	if e != nil {
-	// 		log.Println("Failed to download ipv4.txt: ", e, "\nFallback to ipv4_old.txt")
-	// 		conf.IplistPath = "ipv4_old.txt"
-	// 	}
-	// }
+	// Load config file (checking cwd and executable directory)
+	resolvedConfigPath := resolveFilePath(configPath)
+	cfile, cfile_err := os.ReadFile(resolvedConfigPath)
+	conf := Conf{}
+	if cfile_err != nil {
+		if cliIP != "" {
+			conf = defaultConf()
+			color.Yellow("Notice: config file '%s' not found; scanning with built-in Cloudflare defaults.\n", configPath)
+		} else {
+			exitOnError(fmt.Errorf("failed to read config file '%s': %w", configPath, cfile_err))
+			return
+		}
+	} else {
+		conf_err := json.Unmarshal(cfile, &conf)
+		if conf_err != nil {
+			exitOnError(fmt.Errorf("failed to parse config JSON '%s': %w", configPath, conf_err))
+			return
+		}
+	}
+
+	if cliIP != "" {
+		conf.IplistPath = cliIP
+		if prefix, port, err := parseIPOrPrefixWithPort(cliIP); err == nil {
+			if prefix.Addr().Is6() {
+				conf.IpVersion = 6
+			} else {
+				conf.IpVersion = 4
+			}
+			if port > 0 {
+				conf.Ports = []int{port}
+			}
+		} else {
+			// If cliIP is not an existing file on disk, report exact IP parsing error
+			if _, statErr := os.Stat(resolveFilePath(cliIP)); statErr != nil {
+				exitOnError(fmt.Errorf("invalid IP address or CIDR '%s': %w", cliIP, err))
+				return
+			}
+		}
+	} else if prefix, port, err := parseIPOrPrefixWithPort(conf.IplistPath); err == nil {
+		if prefix.Addr().Is6() {
+			conf.IpVersion = 6
+		} else if prefix.Addr().Is4() && conf.IpVersion == 6 {
+			conf.IpVersion = 4
+		}
+		if len(conf.Ports) == 0 && port > 0 {
+			conf.Ports = []int{port}
+		}
+	}
 
 	ips := make([]string, 0, 256)
 	switch conf.IpVersion {
@@ -164,13 +319,63 @@ func main() {
 		GenIPs(&ips, conf.IplistPath, conf.IgnoreRange, conf.AllowRange)
 	case 6:
 		// Load CIDRs into list and generate random IPv6 during scan
-		file, ipListFileErr := os.ReadFile(conf.IplistPath)
-		if ipListFileErr != nil {
-			log.Fatalln(ipListFileErr)
+		trimmedPath := strings.TrimSpace(conf.IplistPath)
+		if trimmedPath == "" {
+			exitOnError(errors.New("empty IPv6 list path"))
+			return
 		}
-		ips = strings.Split(string(file), "\n")
+		if prefix, _, err := parseIPOrPrefixWithPort(trimmedPath); err == nil {
+			if prefix.IsSingleIP() {
+				ips = []string{prefix.Addr().String()}
+			} else {
+				ips = []string{prefix.String()}
+			}
+		} else if strings.ContainsAny(trimmedPath, ",;") {
+			parts := strings.FieldsFunc(trimmedPath, func(r rune) bool {
+				return r == ',' || r == ';'
+			})
+			for _, part := range parts {
+				part = stripComment(part)
+				if part == "" {
+					continue
+				}
+				if prefix, _, err := parseIPOrPrefixWithPort(part); err == nil {
+					if prefix.IsSingleIP() {
+						ips = append(ips, prefix.Addr().String())
+					} else {
+						ips = append(ips, prefix.String())
+					}
+				}
+			}
+		} else {
+			resolvedPath := resolveFilePath(trimmedPath)
+			file, ipListFileErr := os.ReadFile(resolvedPath)
+			if ipListFileErr != nil {
+				exitOnError(fmt.Errorf("failed to read IPv6 list file '%s': %w", trimmedPath, ipListFileErr))
+				return
+			} else {
+				content := strings.TrimPrefix(string(file), "\ufeff")
+				for line := range strings.Lines(content) {
+					line = stripComment(line)
+					if line == "" {
+						continue
+					}
+					if prefix, _, err := parseIPOrPrefixWithPort(line); err == nil && prefix.IsSingleIP() {
+						ips = append(ips, prefix.Addr().String())
+					} else {
+						ips = append(ips, line)
+					}
+				}
+			}
+		}
 	default:
-		log.Fatalln("Invalid IP version")
+		exitOnError(fmt.Errorf("invalid IP version: %d (must be 4 or 6)", conf.IpVersion))
+		return
+	}
+
+	if len(ips) == 0 {
+		exitOnError(errors.New("no valid IP addresses found to scan"))
+		return
 	}
 
 	fingerprint := utls.HelloChrome_Auto
@@ -209,12 +414,28 @@ func main() {
 	}
 	defer file.Close()
 
-	LOG := conf.LogErr
+	var hasScanErrors atomic.Bool
+	var successfulScans atomic.Int64
+	singleTarget := len(ips) == 1
+	LOG := conf.LogErr || singleTarget
 	if !conf.DomainScan.Enable {
-		ip_ch := make(chan string, conf.Goroutines)
+		goroutines := conf.Goroutines
+		if goroutines < 1 {
+			goroutines = 1
+		}
+		if len(ips) < goroutines {
+			goroutines = len(ips)
+		}
+		ip_ch := make(chan string, goroutines)
 		var wg sync.WaitGroup
-		for range conf.Goroutines {
+		for range goroutines {
 			wg.Go(func() {
+				defer func() {
+					if r := recover(); r != nil {
+						exitOnError(fmt.Errorf("scan worker panic: %v", r))
+					}
+				}()
+
 				var client *http.Client
 				if conf.TLS.Enable {
 					if conf.HTTP3 {
@@ -240,7 +461,21 @@ func main() {
 						pinger.Timeout = time.Duration(conf.Ping.MaxPing) * time.Millisecond
 						pinger.Count = 1
 						pinging_err := pinger.Run()
+						if pinging_err != nil && runtime.GOOS == "windows" {
+							// On Windows, try toggling privileged mode if the configured mode fails
+							pingerFallback := probing.New(ip)
+							pingerFallback.SetPrivileged(!conf.Ping.Privileged)
+							pingerFallback.Size = pinger.Size
+							pingerFallback.Timeout = pinger.Timeout
+							pingerFallback.Count = 1
+							if fallbackErr := pingerFallback.Run(); fallbackErr == nil {
+								pinging_err = nil
+								pinger = pingerFallback
+							}
+						}
 						if pinging_err != nil {
+							recordScanError(fmt.Sprintf("PING %s: %s", ip, pinging_err))
+							hasScanErrors.Store(true)
 							if LOG {
 								color.Red("PING: %s", pinging_err)
 							}
@@ -248,6 +483,8 @@ func main() {
 						}
 
 						if pinger.Statistics().PacketLoss > 0 || pinger.Statistics().MinRtt > (time.Duration(conf.Ping.MaxPing)*time.Millisecond) {
+							recordScanError(fmt.Sprintf("PING %s: packet loss or RTT %s > max %v", ip, pinger.Statistics().MinRtt, conf.Ping.MaxPing))
+							hasScanErrors.Store(true)
 							if LOG {
 								color.Red("PING: %s\t%s", ip, pinger.Statistics().MinRtt)
 							}
@@ -281,6 +518,8 @@ func main() {
 						if conf.TLS.Utls.Enable && conf.TLS.Enable && !conf.HTTP3 {
 							uclient, utlsE := utlsTransporter(&conf, fingerprint, conf.TLS.SNI, addr, &fragment)
 							if utlsE != nil {
+								recordScanError(fmt.Sprintf("%s: %s", addr.String(), utlsE))
+								hasScanErrors.Store(true)
 								if LOG {
 									color.Red("%s", utlsE)
 								}
@@ -294,6 +533,8 @@ func main() {
 						e := time.Now()
 						latency := e.UnixMilli() - s.UnixMilli()
 						if http_err != nil {
+							recordScanError(fmt.Sprintf("%s: %s", addr.String(), http_err))
+							hasScanErrors.Store(true)
 							if LOG {
 								color.Red("%s", http_err)
 							}
@@ -303,6 +544,8 @@ func main() {
 						if slices.Contains(conf.ResponseStatusCode, respone.StatusCode) {
 							matchHeadersE := matchHeaders(respone.Header, conf.ResponseHeader)
 							if matchHeadersE != nil {
+								recordScanError(fmt.Sprintf("%s: %s", addr.String(), matchHeadersE))
+								hasScanErrors.Store(true)
 								color.Red("%s", matchHeadersE)
 								continue
 							}
@@ -329,14 +572,18 @@ func main() {
 									}
 								}
 								if jammed {
+									recordScanError(fmt.Sprintf("%s: connection jammed during jitter test", addr.String()))
+									hasScanErrors.Store(true)
 									if LOG {
-										color.Yellow("%s\t%s\t%d\tJAMMED", addr, minrtt, latency)
+										color.Yellow("%s\t%s\t%d\tJAMMED", addr.String(), minrtt, latency)
 									}
 									continue
 								}
 								jitter := Calc_jitter(latencies)
 								if jitter > conf.Jitter.MaxJitter {
-									color.Yellow("%s\t%s\t%d\t%f", addr, minrtt, latency, jitter)
+									recordScanError(fmt.Sprintf("%s: jitter %.2f exceeded max %.2f", addr.String(), jitter, conf.Jitter.MaxJitter))
+									hasScanErrors.Store(true)
+									color.Yellow("%s\t%s\t%d\t%f", addr.String(), minrtt, latency, jitter)
 									continue
 								}
 								jitter_str = fmt.Sprintf("%f", jitter)
@@ -347,6 +594,7 @@ func main() {
 							if conf.UploadTest.Enable {
 								upload_test = uploadTest(client, &conf, addr, fingerprint, &fragment)
 							}
+							successfulScans.Add(1)
 							rep := fmt.Sprintf("%-21s %-12s %d\t%s\t%s\t%s\n", addr.String(), minrtt, latency, jitter_str, download_test, upload_test)
 							color.Green("%s", rep)
 							if conf.CSV {
@@ -355,6 +603,8 @@ func main() {
 								file.Write(rep)
 							}
 						} else {
+							recordScanError(fmt.Sprintf("%s: HTTP status %d", addr.String(), respone.StatusCode))
+							hasScanErrors.Store(true)
 							if LOG {
 								color.Red("%s\t%s\tHTTP.StatusCode=%d", addr.String(), minrtt, respone.StatusCode)
 							}
@@ -374,30 +624,65 @@ func main() {
 					ip_ch <- ip
 				}
 			case 6:
-				for {
-					ipv6, e := randomIPv6FromCIDR(strings.TrimSpace(ips[rand.Intn(len(ips))]))
-					if e != nil {
-						continue
+				if isAllSingleIPs(ips) {
+					for _, ip := range ips {
+						ipv6, e := randomIPv6FromCIDR(ip)
+						if e != nil {
+							continue
+						}
+						ip_ch <- ipv6.String()
 					}
-					ip_ch <- ipv6.String()
+				} else {
+					for {
+						ipv6, e := randomIPv6FromCIDR(strings.TrimSpace(ips[rand.Intn(len(ips))]))
+						if e != nil {
+							continue
+						}
+						ip_ch <- ipv6.String()
+					}
 				}
 			}
 		} else {
-			if conf.IpVersion != 4 {
-				log.Fatalln("linear method is only available for ipv4")
+			if conf.IpVersion == 6 && !isAllSingleIPs(ips) {
+				exitOnError(errors.New("linear scan method is only available for single IPv6 addresses or IPv4; for IPv6 CIDR subnets, enable RandomScan"))
+				return
 			}
 			for _, ip := range ips {
-				ip_ch <- ip
+				if pfx, err := parseIPOrPrefix(ip); err == nil && pfx.IsSingleIP() {
+					ip_ch <- pfx.Addr().String()
+				} else {
+					ip_ch <- ip
+				}
 			}
 		}
 		close(ip_ch)
 
 		wg.Wait()
+
+		if runtime.GOOS == "windows" {
+			if successfulScans.Load() == 0 {
+				if hasScanErrors.Load() {
+					color.Red("\nNo IP passed the scan. Encountered scan errors:")
+					recentErrorsLock.Lock()
+					for _, errStr := range recentErrors {
+						color.Red("  - %s", errStr)
+					}
+					recentErrorsLock.Unlock()
+				} else {
+					color.Yellow("\nNo IP passed the scan criteria.")
+				}
+			} else {
+				color.Cyan("\nScan finished. Total successful: %d", successfulScans.Load())
+			}
+			waitOnWindows()
+		}
 	} else {
 		// Domain Scan
-		domainListFile, domainListFileErr := os.ReadFile(conf.DomainScan.DomainListPath)
+		resolvedDomainListPath := resolveFilePath(conf.DomainScan.DomainListPath)
+		domainListFile, domainListFileErr := os.ReadFile(resolvedDomainListPath)
 		if domainListFileErr != nil {
-			log.Fatalln(domainListFileErr)
+			exitOnError(fmt.Errorf("failed to read domain list file '%s': %w", conf.DomainScan.DomainListPath, domainListFileErr))
+			return
 		}
 
 		domains := strings.Split(string(domainListFile), "\n")
@@ -407,13 +692,30 @@ func main() {
 			})
 		}
 
+		var domainScanErrors atomic.Bool
+		var domainSuccessfulScans atomic.Int64
 		var wg sync.WaitGroup
-		for domainsChunk := range slices.Chunk(domains, len(domains)/conf.Goroutines) {
+		chunkSize := len(domains) / conf.Goroutines
+		if chunkSize < 1 {
+			chunkSize = 1
+		}
+		for domainsChunk := range slices.Chunk(domains, chunkSize) {
 			wg.Go(func() {
+				defer func() {
+					if r := recover(); r != nil {
+						exitOnError(fmt.Errorf("domain worker panic: %v", r))
+					}
+				}()
+
 				for _, domain := range domainsChunk {
 					domain := strings.TrimSpace(domain)
+					if domain == "" || strings.HasPrefix(domain, "#") || strings.HasPrefix(domain, "//") {
+						continue
+					}
 					ips, resolve_err := net.LookupIP(domain)
 					if resolve_err != nil {
+						recordScanError(fmt.Sprintf("DNS %s: %s", domain, resolve_err))
+						domainScanErrors.Store(true)
 						color.HiYellow("%s", resolve_err)
 						continue
 					}
@@ -435,7 +737,21 @@ func main() {
 
 							pinger.Count = 1
 							pinging_err := pinger.Run()
+							if pinging_err != nil && runtime.GOOS == "windows" {
+								// On Windows, try toggling privileged mode if the configured mode fails
+								pingerFallback := probing.New(ip.String())
+								pingerFallback.SetPrivileged(!conf.Ping.Privileged)
+								pingerFallback.Size = pinger.Size
+								pingerFallback.Timeout = pinger.Timeout
+								pingerFallback.Count = 1
+								if fallbackErr := pingerFallback.Run(); fallbackErr == nil {
+									pinging_err = nil
+									pinger = pingerFallback
+								}
+							}
 							if pinging_err != nil {
+								recordScanError(fmt.Sprintf("PING %s(%s): %s", domain, ip, pinging_err))
+								domainScanErrors.Store(true)
 								if LOG {
 									color.Red("PING: %s", pinging_err)
 								}
@@ -443,6 +759,8 @@ func main() {
 							}
 
 							if pinger.Statistics().PacketLoss > 0 || pinger.Statistics().MinRtt > (time.Duration(conf.Ping.MaxPing)*time.Millisecond) {
+								recordScanError(fmt.Sprintf("PING %s(%s): packet loss or RTT %s > max %v", domain, ip, pinger.Statistics().MinRtt, conf.Ping.MaxPing))
+								domainScanErrors.Store(true)
 								if LOG {
 									color.Red("PING: %s(%s)\t%s", domain, ip, pinger.Statistics().MinRtt)
 								}
@@ -484,6 +802,8 @@ func main() {
 							if conf.TLS.Utls.Enable && conf.TLS.Enable && !conf.HTTP3 {
 								uclient, utlsE := utlsTransporter(&conf, fingerprint, sni, addr, &fragment)
 								if utlsE != nil {
+									recordScanError(fmt.Sprintf("%s(%s): %s", domain, addr.String(), utlsE))
+									domainScanErrors.Store(true)
 									if LOG {
 										color.Red("%s", utlsE)
 									}
@@ -497,6 +817,8 @@ func main() {
 							e := time.Now()
 							latency := e.UnixMilli() - s.UnixMilli()
 							if http_err != nil {
+								recordScanError(fmt.Sprintf("%s(%s): %s", domain, addr.String(), http_err))
+								domainScanErrors.Store(true)
 								if LOG {
 									color.Red("%s", http_err)
 								}
@@ -506,6 +828,8 @@ func main() {
 							if slices.Contains(conf.ResponseStatusCode, respone.StatusCode) {
 								matchHeadersE := matchHeaders(respone.Header, conf.ResponseHeader)
 								if matchHeadersE != nil {
+									recordScanError(fmt.Sprintf("%s(%s): %s", domain, addr.String(), matchHeadersE))
+									domainScanErrors.Store(true)
 									color.Red("%s(%s)\t%s", domain, ip, matchHeadersE)
 									continue
 								}
@@ -516,7 +840,7 @@ func main() {
 								if conf.Jitter.Enable {
 									latencies := []float64{}
 									jammed := false
-									for range 5 {
+									for range conf.Jitter.Samples {
 										s := time.Now()
 										// send request
 										_, http_err := client.Do(&req)
@@ -532,6 +856,8 @@ func main() {
 										}
 									}
 									if jammed {
+										recordScanError(fmt.Sprintf("%s(%s): connection jammed during jitter test", domain, addr.String()))
+										domainScanErrors.Store(true)
 										if LOG {
 											color.Yellow("%s(%s)\t%s\t%d\tJAMMED", domain, ip, minrtt, latency)
 										}
@@ -539,6 +865,8 @@ func main() {
 									}
 									jitter := Calc_jitter(latencies)
 									if jitter > conf.Jitter.MaxJitter {
+										recordScanError(fmt.Sprintf("%s(%s): jitter %.2f exceeded max %.2f", domain, addr.String(), jitter, conf.Jitter.MaxJitter))
+										domainScanErrors.Store(true)
 										color.Yellow("%s(%s)\t%s\t%d\t%f", domain, ip, minrtt, latency, jitter)
 										continue
 									}
@@ -550,6 +878,7 @@ func main() {
 								if conf.UploadTest.Enable {
 									upload_test = uploadTest(client, &conf, addr, fingerprint, &fragment)
 								}
+								domainSuccessfulScans.Add(1)
 								rep := fmt.Sprintf("%s:\t%s\t%s\t%d\t%s\t%s\t%s\n", domain, ip, minrtt, latency, jitter_str, download_test, upload_test)
 								color.Green("%s", rep)
 								if conf.CSV {
@@ -558,6 +887,8 @@ func main() {
 									file.Write(rep)
 								}
 							} else {
+								recordScanError(fmt.Sprintf("%s(%s): HTTP status %d", domain, addr.String(), respone.StatusCode))
+								domainScanErrors.Store(true)
 								if LOG {
 									color.Red("%s(%s)\t%s\tHTTP.StatusCode=%d", domain, ip, minrtt, respone.StatusCode)
 								}
@@ -569,6 +900,24 @@ func main() {
 		}
 
 		wg.Wait()
+
+		if runtime.GOOS == "windows" {
+			if domainSuccessfulScans.Load() == 0 {
+				if domainScanErrors.Load() {
+					color.Red("\nNo domain passed the scan. Encountered scan errors:")
+					recentErrorsLock.Lock()
+					for _, errStr := range recentErrors {
+						color.Red("  - %s", errStr)
+					}
+					recentErrorsLock.Unlock()
+				} else {
+					color.Yellow("\nNo domain passed the scan criteria.")
+				}
+			} else {
+				color.Cyan("\nDomain scan finished. Total successful: %d", domainSuccessfulScans.Load())
+			}
+			waitOnWindows()
+		}
 	}
 }
 
@@ -599,7 +948,7 @@ func fgen(f string) utls.ClientHelloID {
 	case "ios":
 		finger = utls.HelloIOS_Auto
 	default:
-		log.Fatalln("Invalid fingerprint")
+		exitOnError(fmt.Errorf("invalid fingerprint '%s' (supported: firefox, edge, chrome, 360, ios)", f))
 	}
 
 	return finger
@@ -609,40 +958,47 @@ func RandomString(n string) string {
 	bytes := make([]byte, randomRange(n))
 	_, err := crand.Read(bytes)
 	if err != nil {
-		log.Fatalln(err)
+		exitOnError(fmt.Errorf("failed to generate random string: %w", err))
 	}
 	return base64.RawURLEncoding.EncodeToString(bytes)
 }
 
 func parseRange(r string) (a int, b int) {
-	if !strings.Contains(r, "-") {
+	r = strings.TrimSpace(r)
+	if r == "" {
 		return 0, 0
 	}
 
 	ab := strings.Split(r, "-")
-	a, a_err := strconv.Atoi(ab[0])
+	var a_err, b_err error
+	a, a_err = strconv.Atoi(strings.TrimSpace(ab[0]))
 	if a_err != nil {
-		log.Fatalln(a_err)
+		exitOnError(fmt.Errorf("invalid range '%s': %w", r, a_err))
+		return 0, 0
 	}
-	b, b_err := strconv.Atoi(ab[1])
+	if len(ab) == 1 {
+		return a, a
+	}
+	b, b_err = strconv.Atoi(strings.TrimSpace(ab[1]))
 	if b_err != nil {
-		log.Fatalln(b_err)
+		exitOnError(fmt.Errorf("invalid range '%s': %w", r, b_err))
+		return 0, 0
 	}
-
+	if a > b {
+		a, b = b, a
+	}
 	return a, b
 }
 
 func randomRange(r string) int {
-	ab := strings.Split(r, "-")
-	a, a_err := strconv.Atoi(ab[0])
-	if a_err != nil {
-		log.Fatalln(a_err)
+	r = strings.TrimSpace(r)
+	if r == "" {
+		return 0
 	}
-	b, b_err := strconv.Atoi(ab[1])
-	if b_err != nil {
-		log.Fatalln(b_err)
+	a, b := parseRange(r)
+	if a == b {
+		return a
 	}
-
 	return rand.Intn(b-a+1) + a
 }
 

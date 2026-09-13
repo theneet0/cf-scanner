@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
-	"log"
+	"fmt"
 	"net"
 	"time"
 )
@@ -17,20 +17,20 @@ func SendNoises(udp net.PacketConn, addr *net.UDPAddr, packets []NoisePacket) {
 		case "base64":
 			b64, b64E := base64.StdEncoding.DecodeString(packet.Payload)
 			if b64E != nil {
-				log.Fatalln(b64E)
+				exitOnError(fmt.Errorf("noise base64 decode error: %w", b64E))
 			}
 			udp.WriteTo(b64, addr)
 		case "hex":
 			hex, hexE := hex.DecodeString(packet.Payload)
 			if hexE != nil {
-				log.Fatalln(hexE)
+				exitOnError(fmt.Errorf("noise hex decode error: %w", hexE))
 			}
 			udp.WriteTo(hex, addr)
 		case "rand":
 			bytes := make([]byte, randomRange(packet.Payload))
 			_, err := rand.Read(bytes)
 			if err != nil {
-				log.Fatalln(err)
+				exitOnError(fmt.Errorf("noise random bytes error: %w", err))
 			}
 			udp.WriteTo(bytes, addr)
 		}
