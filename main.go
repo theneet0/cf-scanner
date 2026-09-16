@@ -30,6 +30,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	utls "github.com/refraction-networking/utls"
+	"github.com/schollz/progressbar/v3"
 )
 
 type DS struct {
@@ -108,7 +109,9 @@ type PingConfig struct {
 }
 
 type Conf struct {
-	LogErr             bool                `json:"LogErr"`
+	ProgressBar        bool                `json:"ProgressBar"`
+	Log                bool                `json:"Log"`
+	LogErr             bool                `json:"LogErr,omitempty"`
 	CSV                bool                `json:"CSV"`
 	RandomScan         bool                `json:"RandomScan"`
 	Hostname           string              `json:"Hostname"`
@@ -155,6 +158,8 @@ func recordScanError(msg string) {
 
 func defaultConf() Conf {
 	return Conf{
+		ProgressBar:        true,
+		Log:                true,
 		LogErr:             true,
 		CSV:                false,
 		RandomScan:         false,
@@ -314,9 +319,13 @@ func main() {
 	ips := make([]string, 0, 256)
 	switch conf.IpVersion {
 	case 4:
-		// Generate IPs from CIDRs
-		color.Yellow("Generating IPs\n")
-		GenIPs(&ips, conf.IplistPath, conf.IgnoreRange, conf.AllowRange)
+		// Generate IPs from CIDRs or single IPs
+		if isSingleIP(conf.IplistPath) {
+			ips = []string{conf.IplistPath}
+		} else {
+			color.Yellow("Generating IPs\n")
+			GenIPs(&ips, conf.IplistPath, conf.IgnoreRange, conf.AllowRange)
+		}
 	case 6:
 		// Load CIDRs into list and generate random IPv6 during scan
 		trimmedPath := strings.TrimSpace(conf.IplistPath)
@@ -417,7 +426,10 @@ func main() {
 	var hasScanErrors atomic.Bool
 	var successfulScans atomic.Int64
 	singleTarget := len(ips) == 1
-	LOG := conf.LogErr || singleTarget
+	LOG := conf.Log || conf.LogErr || singleTarget
+	if conf.ProgressBar {
+		LOG = false
+	}
 	if !conf.DomainScan.Enable {
 		goroutines := conf.Goroutines
 		if goroutines < 1 {
@@ -546,7 +558,9 @@ func main() {
 							if matchHeadersE != nil {
 								recordScanError(fmt.Sprintf("%s: %s", addr.String(), matchHeadersE))
 								hasScanErrors.Store(true)
-								color.Red("%s", matchHeadersE)
+								if LOG {
+									color.Red("%s", matchHeadersE)
+								}
 								continue
 							}
 							// Calc jiiter
@@ -583,7 +597,9 @@ func main() {
 								if jitter > conf.Jitter.MaxJitter {
 									recordScanError(fmt.Sprintf("%s: jitter %.2f exceeded max %.2f", addr.String(), jitter, conf.Jitter.MaxJitter))
 									hasScanErrors.Store(true)
-									color.Yellow("%s\t%s\t%d\t%f", addr.String(), minrtt, latency, jitter)
+									if LOG {
+										color.Yellow("%s\t%s\t%d\t%f", addr.String(), minrtt, latency, jitter)
+									}
 									continue
 								}
 								jitter_str = fmt.Sprintf("%f", jitter)
@@ -596,7 +612,9 @@ func main() {
 							}
 							successfulScans.Add(1)
 							rep := fmt.Sprintf("%-21s %-12s %d\t%s\t%s\t%s\n", addr.String(), minrtt, latency, jitter_str, download_test, upload_test)
-							color.Green("%s", rep)
+							if LOG {
+								color.Green("%s", rep)
+							}
 							if conf.CSV {
 								file.Write(fmt.Sprintf("%s,%s,%d,%s,%s,%s\n", addr.String(), minrtt, latency, jitter_str, download_test, upload_test))
 							} else {
@@ -614,6 +632,11 @@ func main() {
 			})
 		}
 
+		var pbar *progressbar.ProgressBar
+		if conf.ProgressBar && (conf.IpVersion == 4 || isAllSingleIPs(ips)) {
+			pbar = progressbar.Default(int64(len(ips)))
+		}
+
 		if conf.RandomScan {
 			switch conf.IpVersion {
 			case 4:
@@ -622,6 +645,9 @@ func main() {
 				})
 				for _, ip := range ips {
 					ip_ch <- ip
+					if pbar != nil {
+						pbar.Add(1)
+					}
 				}
 			case 6:
 				if isAllSingleIPs(ips) {
@@ -631,6 +657,9 @@ func main() {
 							continue
 						}
 						ip_ch <- ipv6.String()
+						if pbar != nil {
+							pbar.Add(1)
+						}
 					}
 				} else {
 					for {
@@ -652,6 +681,9 @@ func main() {
 					ip_ch <- pfx.Addr().String()
 				} else {
 					ip_ch <- ip
+				}
+				if pbar != nil {
+					pbar.Add(1)
 				}
 			}
 		}
@@ -694,6 +726,10 @@ func main() {
 
 		var domainScanErrors atomic.Bool
 		var domainSuccessfulScans atomic.Int64
+		var pbar *progressbar.ProgressBar
+		if conf.ProgressBar {
+			pbar = progressbar.Default(int64(len(domains)))
+		}
 		var wg sync.WaitGroup
 		chunkSize := len(domains) / conf.Goroutines
 		if chunkSize < 1 {
@@ -708,6 +744,9 @@ func main() {
 				}()
 
 				for _, domain := range domainsChunk {
+					if conf.ProgressBar {
+						pbar.Add(1)
+					}
 					domain := strings.TrimSpace(domain)
 					if domain == "" || strings.HasPrefix(domain, "#") || strings.HasPrefix(domain, "//") {
 						continue
@@ -716,7 +755,9 @@ func main() {
 					if resolve_err != nil {
 						recordScanError(fmt.Sprintf("DNS %s: %s", domain, resolve_err))
 						domainScanErrors.Store(true)
-						color.HiYellow("%s", resolve_err)
+						if LOG {
+							color.HiYellow("%s", resolve_err)
+						}
 						continue
 					}
 
@@ -830,7 +871,9 @@ func main() {
 								if matchHeadersE != nil {
 									recordScanError(fmt.Sprintf("%s(%s): %s", domain, addr.String(), matchHeadersE))
 									domainScanErrors.Store(true)
-									color.Red("%s(%s)\t%s", domain, ip, matchHeadersE)
+									if LOG {
+										color.Red("%s(%s)\t%s", domain, ip, matchHeadersE)
+									}
 									continue
 								}
 								// Calc jiiter
@@ -867,7 +910,9 @@ func main() {
 									if jitter > conf.Jitter.MaxJitter {
 										recordScanError(fmt.Sprintf("%s(%s): jitter %.2f exceeded max %.2f", domain, addr.String(), jitter, conf.Jitter.MaxJitter))
 										domainScanErrors.Store(true)
-										color.Yellow("%s(%s)\t%s\t%d\t%f", domain, ip, minrtt, latency, jitter)
+										if LOG {
+											color.Yellow("%s(%s)\t%s\t%d\t%f", domain, ip, minrtt, latency, jitter)
+										}
 										continue
 									}
 									jitter_str = fmt.Sprintf("%f", jitter)
@@ -880,7 +925,9 @@ func main() {
 								}
 								domainSuccessfulScans.Add(1)
 								rep := fmt.Sprintf("%s:\t%s\t%s\t%d\t%s\t%s\t%s\n", domain, ip, minrtt, latency, jitter_str, download_test, upload_test)
-								color.Green("%s", rep)
+								if LOG {
+									color.Green("%s", rep)
+								}
 								if conf.CSV {
 									file.Write(fmt.Sprintf("%s:%s,%s,%d,%s,%s,%s\n", domain, ip, minrtt, latency, jitter_str, download_test, upload_test))
 								} else {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -117,6 +118,40 @@ func TestDefaultConf(t *testing.T) {
 	}
 	if !conf.Ping.Privileged {
 		t.Errorf("expected privileged ping in default conf matching conf.json")
+	}
+	if !conf.ProgressBar {
+		t.Errorf("expected ProgressBar to be enabled by default")
+	}
+	if !conf.Log {
+		t.Errorf("expected Log to be enabled by default")
+	}
+}
+
+func TestConfJSONUnmarshal(t *testing.T) {
+	data, err := os.ReadFile("conf.json")
+	if err != nil {
+		t.Fatalf("failed to read conf.json: %v", err)
+	}
+
+	var conf Conf
+	if err := json.Unmarshal(data, &conf); err != nil {
+		t.Fatalf("failed to unmarshal conf.json: %v", err)
+	}
+
+	if !conf.ProgressBar {
+		t.Errorf("expected conf.json ProgressBar to be true")
+	}
+	if !conf.Log {
+		t.Errorf("expected conf.json Log to be true")
+	}
+	if conf.Hostname != "cp.cloudflare.com" {
+		t.Errorf("expected conf.json Hostname to be cp.cloudflare.com, got %s", conf.Hostname)
+	}
+	if conf.UploadTest.Url != "https://speed.cloudflare.com/__up" {
+		t.Errorf("expected conf.json UploadTest.Url to be preserved, got %s", conf.UploadTest.Url)
+	}
+	if conf.DownloadTest.Url != "https://speed.cloudflare.com/__down?bytes=10000000" {
+		t.Errorf("expected conf.json DownloadTest.Url to be preserved, got %s", conf.DownloadTest.Url)
 	}
 }
 
