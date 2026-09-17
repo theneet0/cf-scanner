@@ -22,24 +22,8 @@ builds:
     goos:
       - linux
       - windows
-      - darwin
     goarch:
-      - 386
       - amd64
-      - arm64
-    ignore:
-      - goos: darwin
-        goarch: 386
-  - id: linux-arm
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-    goarch:
-      - arm
-    goarm:
-      - 6
-      - 7
 
 archives:
   - formats: [tar.gz]
