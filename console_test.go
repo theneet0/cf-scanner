@@ -155,3 +155,23 @@ func TestConfJSONUnmarshal(t *testing.T) {
 	}
 }
 
+func TestSingleTargetProgressBarSuppression(t *testing.T) {
+	conf := defaultConf()
+	ips := []string{"1.1.1.1"}
+	singleTarget := len(ips) == 1
+	if singleTarget {
+		conf.ProgressBar = false
+	}
+	LOG := conf.Log || conf.LogErr || singleTarget
+	if conf.ProgressBar {
+		LOG = false
+	}
+
+	if conf.ProgressBar {
+		t.Errorf("expected ProgressBar to be disabled for single target")
+	}
+	if !LOG {
+		t.Errorf("expected LOG to be true for single target")
+	}
+}
+

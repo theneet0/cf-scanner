@@ -320,12 +320,10 @@ func main() {
 	switch conf.IpVersion {
 	case 4:
 		// Generate IPs from CIDRs or single IPs
-		if isSingleIP(conf.IplistPath) {
-			ips = []string{conf.IplistPath}
-		} else {
+		if !isSingleIP(conf.IplistPath) {
 			color.Yellow("Generating IPs\n")
-			GenIPs(&ips, conf.IplistPath, conf.IgnoreRange, conf.AllowRange)
 		}
+		GenIPs(&ips, conf.IplistPath, conf.IgnoreRange, conf.AllowRange)
 	case 6:
 		// Load CIDRs into list and generate random IPv6 during scan
 		trimmedPath := strings.TrimSpace(conf.IplistPath)
@@ -426,6 +424,9 @@ func main() {
 	var hasScanErrors atomic.Bool
 	var successfulScans atomic.Int64
 	singleTarget := len(ips) == 1
+	if singleTarget {
+		conf.ProgressBar = false
+	}
 	LOG := conf.Log || conf.LogErr || singleTarget
 	if conf.ProgressBar {
 		LOG = false
@@ -744,7 +745,7 @@ func main() {
 				}()
 
 				for _, domain := range domainsChunk {
-					if conf.ProgressBar {
+					if pbar != nil {
 						pbar.Add(1)
 					}
 					domain := strings.TrimSpace(domain)

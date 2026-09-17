@@ -132,7 +132,7 @@ func uploadTest(preclient *http.Client, conf *Conf, addr net.TCPAddr, fingerprin
 				ch <- "JAMMED"
 				return
 			}
-			if conf.LogErr {
+			if (conf.Log || conf.LogErr) && !conf.ProgressBar {
 				color.Red("Upload error: %s", httpErr.Error())
 			}
 			ch <- "FAILED"
@@ -141,7 +141,7 @@ func uploadTest(preclient *http.Client, conf *Conf, addr net.TCPAddr, fingerprin
 		defer resp.Body.Close()
 		_, _ = io.Copy(io.Discard, resp.Body)
 		if resp.StatusCode != 200 && resp.StatusCode != 204 {
-			if conf.LogErr {
+			if (conf.Log || conf.LogErr) && !conf.ProgressBar {
 				color.Red("Upload host status code: %s", resp.Status)
 			}
 			ch <- "FAILED"
