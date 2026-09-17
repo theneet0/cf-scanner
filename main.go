@@ -423,7 +423,7 @@ func main() {
 
 	var hasScanErrors atomic.Bool
 	var successfulScans atomic.Int64
-	singleTarget := len(ips) == 1
+	singleTarget := !conf.DomainScan.Enable && len(ips) == 1
 	if singleTarget {
 		conf.ProgressBar = false
 	}
@@ -727,6 +727,12 @@ func main() {
 
 		var domainScanErrors atomic.Bool
 		var domainSuccessfulScans atomic.Int64
+		if len(domains) == 1 {
+			conf.ProgressBar = false
+			LOG = true
+		} else if conf.ProgressBar {
+			LOG = false
+		}
 		var pbar *progressbar.ProgressBar
 		if conf.ProgressBar {
 			pbar = progressbar.Default(int64(len(domains)))

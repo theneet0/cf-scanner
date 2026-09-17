@@ -58,7 +58,7 @@ func downloadTest(preclient *http.Client, conf *Conf, addr net.TCPAddr, fingerpr
 
 	reader := respone.Body
 	defer reader.Close()
-	ch := make(chan string)
+	ch := make(chan string, 1)
 	go func() {
 		buf := make([]byte, 1024*8)
 		read := 0

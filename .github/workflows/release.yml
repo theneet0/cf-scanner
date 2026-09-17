@@ -7,13 +7,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Git tag to release (optional, e.g. v1.11.0)'
+        description: 'Git tag to release (e.g. v1.11.0). Leave empty to auto-generate next version'
         required: false
         default: ''
+      snapshot:
+        description: 'Run snapshot build without publishing release'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   goreleaser:
@@ -29,26 +33,64 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Tag commit if specified via workflow_dispatch
-        if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+      - name: Determine Release Tag and Args
+        id: release_setup
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ inputs.tag }}" -m "Release ${{ inputs.tag }}"
-          git push origin "${{ inputs.tag }}" || true
-      - name: Determine GoReleaser args
-        id: goreleaser_args
-        run: |
-          if [ -n "${{ inputs.tag }}" ] || git describe --exact-match --tags HEAD >/dev/null 2>&1; then
-            echo "args=release --clean" >> "$GITHUB_OUTPUT"
-          else
+          if [ "${{ inputs.snapshot }}" = "true" ]; then
+            echo "Running snapshot build..."
             echo "args=release --clean --snapshot" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+              TAG=$(git describe --exact-match --tags HEAD)
+              echo "HEAD is already tagged with: $TAG"
+            else
+              LATEST_TAG=$(git tag -l --sort=-v:refname "v*" | head -n 1)
+              if [ -z "$LATEST_TAG" ]; then
+                TAG="v1.10.1"
+              else
+                VERSION="${LATEST_TAG#v}"
+                MAJOR=$(echo "$VERSION" | cut -d. -f1)
+                MINOR=$(echo "$VERSION" | cut -d. -f2)
+                PATCH=$(echo "$VERSION" | cut -d. -f3)
+                if [ -z "$PATCH" ]; then PATCH=0; fi
+                NEXT_PATCH=$((PATCH + 1))
+                TAG="v${MAJOR}.${MINOR}.${NEXT_PATCH}"
+                while git rev-parse "$TAG" >/dev/null 2>&1; do
+                  NEXT_PATCH=$((NEXT_PATCH + 1))
+                  TAG="v${MAJOR}.${MINOR}.${NEXT_PATCH}"
+                done
+              fi
+              echo "Auto-generated release tag: $TAG"
+            fi
+          fi
+
+          CURRENT_EXACT=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
+          if [ "$CURRENT_EXACT" != "$TAG" ]; then
+            echo "Tagging HEAD with $TAG..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -fa "$TAG" -m "Release $TAG"
+            git push origin "$TAG" --force || true
+          fi
+
+          echo "args=release --clean" >> "$GITHUB_OUTPUT"
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           version: '~> v2'
-          args: ${{ steps.goreleaser_args.outputs.args }}
+          args: ${{ steps.release_setup.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Snapshot Artifacts
+        if: steps.release_setup.outputs.args == 'release --clean --snapshot'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf-scanner-snapshot
+          path: dist/*
